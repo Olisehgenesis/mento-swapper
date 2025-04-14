@@ -4,26 +4,26 @@ import { celoAlfajores } from 'viem/chains';
 import * as dotenv from 'dotenv';
 
 import erc20Abi from './abi/erc20.json';
-import celoSwapperV2Abi from '../artifacts/contracts/swapVote.sol/CeloSwapperV2.json';
+import celoSwapperV3Abi from '../artifacts/contracts/swapVote.sol/CeloSwapperV3.json';
 
 dotenv.config();
 
 // Configuration
 const ALFAJORES_RPC = 'https://alfajores-forno.celo-testnet.org';
-const CUSD_ADDRESS = '0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1'; // cUSD on Alfajores
 const SLIPPAGE = 0.005; // 0.5% slippage tolerance (50 basis points)
 
 // Get configuration from environment variables
-const SWAPPER_V2_ADDRESS = process.env.SWAPPER_V2_ADDRESS;
+const SWAPPER_V3_ADDRESS = process.env.SWAPPER_V3_ADDRESS;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const RPC_URL = process.env.CELO_RPC_URL || ALFAJORES_RPC;
 const CAMPAIGN_ID = process.env.CAMPAIGN_ID || '1';
 const PROJECT_ID = process.env.PROJECT_ID || '1';
-const SWAP_AMOUNT = process.env.CUSD_AMOUNT || '2'; // Default to 2 cUSD if not specified
+const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS || process.env.CUSD_ADDRESS || '0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1'; // Default to cUSD
+const TOKEN_AMOUNT = process.env.TOKEN_AMOUNT || '2'; // Default to 2 tokens
 
 // Validate required environment variables
-if (!SWAPPER_V2_ADDRESS) {
-  console.error('Error: SWAPPER_V2_ADDRESS environment variable is required');
+if (!SWAPPER_V3_ADDRESS) {
+  console.error('Error: SWAPPER_V3_ADDRESS environment variable is required');
   process.exit(1);
 }
 
@@ -32,7 +32,7 @@ if (!PRIVATE_KEY) {
   process.exit(1);
 }
 
-async function swapAndVote() {
+async function swapAndVoteToken() {
   try {
     // Create wallet client with private key
     const account = privateKeyToAccount(`0x${PRIVATE_KEY}`);
@@ -48,57 +48,106 @@ async function swapAndVote() {
     });
     
     console.log(`Using account: ${account.address}`);
-    console.log(`SwapperV2 Contract: ${SWAPPER_V2_ADDRESS}`);
+    console.log(`SwapperV3 Contract: ${SWAPPER_V3_ADDRESS}`);
     console.log(`Campaign ID: ${CAMPAIGN_ID}`);
     console.log(`Project ID: ${PROJECT_ID}`);
-    console.log(`Swapping ${SWAP_AMOUNT} cUSD to CELO for voting...`);
+    console.log(`Token address: ${TOKEN_ADDRESS}`);
+    console.log(`Token amount: ${TOKEN_AMOUNT}`);
     
-    // Get cUSD decimals
-    const cusdDecimals = await publicClient.readContract({
-      address: CUSD_ADDRESS as `0x${string}`,
+    // Check if token is supported
+    const isSupported = await publicClient.readContract({
+      address: SWAPPER_V3_ADDRESS as `0x${string}`,
+      abi: celoSwapperV3Abi.abi,
+      functionName: 'isTokenSupported',
+      args: [TOKEN_ADDRESS as `0x${string}`]
+    });
+    
+    if (!isSupported) {
+      console.error(`Error: Token ${TOKEN_ADDRESS} is not supported by the swapper contract`);
+      
+      // Get list of supported tokens for better error message
+      const tokenCount = await publicClient.readContract({
+        address: SWAPPER_V3_ADDRESS as `0x${string}`,
+        abi: celoSwapperV3Abi.abi,
+        functionName: 'getSupportedTokenCount'
+      });
+      
+      console.log(`\nSupported tokens (${tokenCount}):`);
+      for (let i = 0; i < Number(tokenCount); i++) {
+        const tokenAddress = await publicClient.readContract({
+          address: SWAPPER_V3_ADDRESS as `0x${string}`,
+          abi: celoSwapperV3Abi.abi,
+          functionName: 'supportedTokenList',
+          args: [BigInt(i)]
+        });
+        console.log(`- ${tokenAddress}`);
+      }
+      
+      process.exit(1);
+    }
+    
+    // Get token decimals
+    const tokenDecimals = await publicClient.readContract({
+      address: TOKEN_ADDRESS as `0x${string}`,
       abi: erc20Abi,
       functionName: 'decimals'
     });
     
+    // Get token symbol
+    let tokenSymbol;
+    try {
+      tokenSymbol = await publicClient.readContract({
+        address: TOKEN_ADDRESS as `0x${string}`,
+        abi: erc20Abi,
+        functionName: 'symbol'
+      });
+    } catch (error) {
+      tokenSymbol = 'Unknown';
+    }
+    
     // Convert amount to wei based on decimals
-    const cusdAmount = parseUnits(
-      SWAP_AMOUNT.toString(),
-      cusdDecimals as number
+    const tokenAmount = parseUnits(
+      TOKEN_AMOUNT.toString(),
+      tokenDecimals as number
     );
     
-    // Check cUSD balance
-    const cusdBalance = await publicClient.readContract({
-      address: CUSD_ADDRESS as `0x${string}`,
+    console.log(`Token symbol: ${tokenSymbol}`);
+    console.log(`Token decimals: ${tokenDecimals}`);
+    console.log(`Swapping ${TOKEN_AMOUNT} ${tokenSymbol} to CELO for voting...`);
+    
+    // Check token balance
+    const tokenBalance = await publicClient.readContract({
+      address: TOKEN_ADDRESS as `0x${string}`,
       abi: erc20Abi,
       functionName: 'balanceOf',
       args: [account.address]
     });
     
-    console.log(`cUSD Balance: ${formatEther(cusdBalance)} cUSD`);
+    console.log(`${tokenSymbol} Balance: ${formatEther(tokenBalance)} ${tokenSymbol}`);
     
-    if (cusdBalance < cusdAmount) {
-      console.error(`Error: Insufficient cUSD balance. You need at least ${SWAP_AMOUNT} cUSD.`);
+    if (tokenBalance < tokenAmount) {
+      console.error(`Error: Insufficient ${tokenSymbol} balance. You need at least ${TOKEN_AMOUNT} ${tokenSymbol}.`);
       process.exit(1);
     }
     
     // Check allowance
     const allowance = await publicClient.readContract({
-      address: CUSD_ADDRESS as `0x${string}`,
+      address: TOKEN_ADDRESS as `0x${string}`,
       abi: erc20Abi,
       functionName: 'allowance',
-      args: [account.address, SWAPPER_V2_ADDRESS as `0x${string}`]
+      args: [account.address, SWAPPER_V3_ADDRESS as `0x${string}`]
     });
     
-    console.log(`Current cUSD allowance for swapper: ${formatEther(allowance)} cUSD`);
+    console.log(`Current ${tokenSymbol} allowance for swapper: ${formatEther(allowance)} ${tokenSymbol}`);
     
-    // If allowance is insufficient, approve the swapper to spend cUSD
-    if (allowance < cusdAmount) {
-      console.log(`Approving swapper to spend ${SWAP_AMOUNT} cUSD...`);
+    // If allowance is insufficient, approve the swapper to spend token
+    if (allowance < tokenAmount) {
+      console.log(`Approving swapper to spend ${TOKEN_AMOUNT} ${tokenSymbol}...`);
       const approveTxHash = await walletClient.writeContract({
-        address: CUSD_ADDRESS as `0x${string}`,
+        address: TOKEN_ADDRESS as `0x${string}`,
         abi: erc20Abi,
         functionName: 'approve',
-        args: [SWAPPER_V2_ADDRESS as `0x${string}`, cusdAmount]
+        args: [SWAPPER_V3_ADDRESS as `0x${string}`, tokenAmount]
       });
       
       console.log(`Approval transaction hash: ${approveTxHash}`);
@@ -110,10 +159,10 @@ async function swapAndVote() {
     
     // Get expected CELO amount
     const [expectedCelo, voteAmount] = await publicClient.readContract({
-      address: SWAPPER_V2_ADDRESS as `0x${string}`,
-      abi: celoSwapperV2Abi.abi,
+      address: SWAPPER_V3_ADDRESS as `0x${string}`,
+      abi: celoSwapperV3Abi.abi,
       functionName: 'getExpectedVoteAmount',
-      args: [cusdAmount]
+      args: [TOKEN_ADDRESS as `0x${string}`, tokenAmount]
     });
     
     console.log(`Expected CELO: ${formatEther(expectedCelo)} CELO`);
@@ -124,10 +173,10 @@ async function swapAndVote() {
     
     // Get minimum CELO amount with slippage protection
     const minCeloAmount = await publicClient.readContract({
-      address: SWAPPER_V2_ADDRESS as `0x${string}`,
-      abi: celoSwapperV2Abi.abi,
+      address: SWAPPER_V3_ADDRESS as `0x${string}`,
+      abi: celoSwapperV3Abi.abi,
       functionName: 'calculateMinCeloAmount',
-      args: [cusdAmount, slippageBps]
+      args: [TOKEN_ADDRESS as `0x${string}`, tokenAmount, slippageBps]
     });
     
     console.log(`Min CELO (with ${SLIPPAGE * 100}% slippage): ${formatEther(minCeloAmount)}`);
@@ -135,10 +184,16 @@ async function swapAndVote() {
     // Execute swap and vote
     console.log('Executing swap and vote...');
     const swapAndVoteTxHash = await walletClient.writeContract({
-      address: SWAPPER_V2_ADDRESS as `0x${string}`,
-      abi: celoSwapperV2Abi.abi,
-      functionName: 'swapAndVote',
-      args: [BigInt(CAMPAIGN_ID), BigInt(PROJECT_ID), cusdAmount, minCeloAmount]
+      address: SWAPPER_V3_ADDRESS as `0x${string}`,
+      abi: celoSwapperV3Abi.abi,
+      functionName: 'swapAndVoteToken',
+      args: [
+        TOKEN_ADDRESS as `0x${string}`,
+        BigInt(CAMPAIGN_ID), 
+        BigInt(PROJECT_ID), 
+        tokenAmount, 
+        minCeloAmount
+      ]
     });
     
     console.log(`Swap and vote transaction hash: ${swapAndVoteTxHash}`);
@@ -153,7 +208,7 @@ async function swapAndVote() {
     const swapEvents = receipt.logs.map(log => {
       try {
         return publicClient.decodeEventLog({
-          abi: celoSwapperV2Abi.abi,
+          abi: celoSwapperV3Abi.abi,
           data: log.data,
           topics: log.topics,
         });
@@ -166,37 +221,39 @@ async function swapAndVote() {
       const event = swapEvents[0];
       console.log('\nTransaction Successful!');
       console.log('--------------------------------------------------');
-      console.log(`Successfully swapped ${SWAP_AMOUNT} cUSD for ${formatEther(event.args.celoVoted)} CELO`);
+      console.log(`Successfully swapped ${formatEther(event.args.tokenAmount)} ${tokenSymbol} for ${formatEther(event.args.celoVoted)} CELO`);
       console.log(`Voted for project ${PROJECT_ID} in campaign ${CAMPAIGN_ID}`);
       
       // Get updated user vote information
-      const userCusdVotes = await publicClient.readContract({
-        address: SWAPPER_V2_ADDRESS as `0x${string}`,
-        abi: celoSwapperV2Abi.abi,
-        functionName: 'getUserCusdVotes',
-        args: [account.address, BigInt(CAMPAIGN_ID), BigInt(PROJECT_ID)]
+      const userTokenVotes = await publicClient.readContract({
+        address: SWAPPER_V3_ADDRESS as `0x${string}`,
+        abi: celoSwapperV3Abi.abi,
+        functionName: 'getUserTokenVotes',
+        args: [account.address, TOKEN_ADDRESS as `0x${string}`, BigInt(CAMPAIGN_ID), BigInt(PROJECT_ID)]
       });
       
-      console.log(`Total cUSD used for this project so far: ${formatEther(userCusdVotes)} cUSD`);
+      console.log(`Total ${tokenSymbol} used for this project so far: ${formatEther(userTokenVotes)} ${tokenSymbol}`);
       console.log('--------------------------------------------------');
     } else {
       console.log("\nTransaction succeeded but couldn't find event data");
       
       // Even if we can't find the event, still show the updated votes
-      const userCusdVotes = await publicClient.readContract({
-        address: SWAPPER_V2_ADDRESS as `0x${string}`,
-        abi: celoSwapperV2Abi.abi,
-        functionName: 'getUserCusdVotes',
-        args: [account.address, BigInt(CAMPAIGN_ID), BigInt(PROJECT_ID)]
+      const userTokenVotes = await publicClient.readContract({
+        address: SWAPPER_V3_ADDRESS as `0x${string}`,
+        abi: celoSwapperV3Abi.abi,
+        functionName: 'getUserTokenVotes',
+        args: [account.address, TOKEN_ADDRESS as `0x${string}`, BigInt(CAMPAIGN_ID), BigInt(PROJECT_ID)]
       });
       
-      console.log(`Total cUSD used for this project: ${formatEther(userCusdVotes)} cUSD`);
+      console.log(`Total ${tokenSymbol} used for this project: ${formatEther(userTokenVotes)} ${tokenSymbol}`);
     }
     
   } catch (error) {
     console.error('Error in swap and vote operation:', error);
+    if (error.message) console.error('Error details:', error.message);
+    if (error.cause) console.error('Error cause:', error.cause);
   }
 }
 
 // Execute the swap and vote
-swapAndVote();
+swapAndVoteToken();
